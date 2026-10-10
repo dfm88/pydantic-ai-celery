@@ -6,8 +6,15 @@ readme = "README.md"
 authors = [
     { name = "Diego Margoni", email = "diegof.university@gmail.com" }
 ]
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "celery>=5.3",
+    "pydantic-ai>=2.36",
+]
+
+[project.optional-dependencies]
+redis = ["redis>=5"]
+postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
 pydantic-ai-celery = "pydantic_ai_celery:main"
