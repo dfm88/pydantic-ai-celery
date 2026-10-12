@@ -1,5 +1,6 @@
 """Celery durability capability, task policy, and container."""
 
+import asyncio
 import logging
 import threading
 import uuid
@@ -149,7 +150,7 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         return current_task_id() is not None
 
     @contextmanager
-    def container(self, task_id: str, *, task: Any = None) -> Iterator[None]:
+    def container(self, task_id: str, *, task: Any = None) -> Iterator[object]:
         """Run `task_id` as one durable container.
 
         Acquires the run lease, bumps the delivery counter, and refreshes the
@@ -157,6 +158,11 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         Pass ``task`` so a duplicate delivery republishes a probe instead of
         running the body. The caller stores the task result before leaving
         the block; the lease is still held then, and released afterwards.
+
+        Yields the stored payload when a completion record is already visible
+        under the new lease, including JSON null. The attempt counter is not
+        bumped in that case. Otherwise yields a private sentinel and the body
+        runs.
         """
         if current_task_id() is not None:
             raise RuntimeError("CeleryDurability.container() is not reentrant")
@@ -166,37 +172,43 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
                 self._duplicate_delivery(task, task_id)
             raise LeaseHeld(f"lease for task {task_id!r} is already held")
         stop = threading.Event()
-        heartbeat = threading.Thread(
-            target=maintain_lease,
-            args=(self._store, task_id, token, self._settings, stop),
-            name=_HEARTBEAT_THREAD_NAME,
-            daemon=True,
-        )
+        heartbeat: threading.Thread | None = None
         try:
-            heartbeat.start()
             with lease_token_scope(token), container_scope(task_id):
-                attempt = self._store.bump_attempt(task_id)
-                if attempt > self._settings.max_deliveries:
-                    message = (
-                        f"task {task_id!r} delivery {attempt} is above "
-                        f"max_deliveries ({self._settings.max_deliveries})"
+                # A duplicate can pass the pre-check, then acquire only after
+                # the owner has stored the result and dropped the lease.
+                cached = self._stored_result(task_id)
+                if cached is not _MISSING:
+                    yield cached
+                else:
+                    heartbeat = threading.Thread(
+                        target=maintain_lease,
+                        args=(self._store, task_id, token, self._settings, stop),
+                        name=_HEARTBEAT_THREAD_NAME,
+                        daemon=True,
                     )
-                    self._emit(
-                        task_id,
-                        "failed",
-                        error_type=NonRetryableDurabilityError.__name__,
-                        error_message=message,
-                    )
-                    raise NonRetryableDurabilityError(message)
-                emit_progress(self._store, self._listeners, task_id, "started")
-                yield
+                    heartbeat.start()
+                    attempt = self._store.bump_attempt(task_id)
+                    if attempt > self._settings.max_deliveries:
+                        message = (
+                            f"task {task_id!r} delivery {attempt} is above "
+                            f"max_deliveries ({self._settings.max_deliveries})"
+                        )
+                        self._emit(
+                            task_id,
+                            "failed",
+                            error_type=NonRetryableDurabilityError.__name__,
+                            error_message=message,
+                        )
+                        raise NonRetryableDurabilityError(message)
+                    emit_progress(self._store, self._listeners, task_id, "started")
+                    yield _MISSING
         finally:
+            # Join with no timeout so an in-flight refresh cannot outlive release.
             stop.set()
-            try:
-                if heartbeat.ident is not None:
-                    heartbeat.join(timeout=self._settings.lease_heartbeat_s)
-            finally:
-                self._store.release_lease(task_id, token)
+            if heartbeat is not None:
+                heartbeat.join()
+            self._store.release_lease(task_id, token)
 
     def completed_result(self, task_id: str) -> object | None:
         """Return the stored task result, or `None` when this id has not finished.
@@ -226,8 +238,11 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         def decorator(fn: Callable[..., Any]) -> CeleryTask:
             if iscoroutinefunction(fn):
 
-                async def run(task_self: CeleryTask, *args: Any, **kwargs: Any) -> Any:
-                    return await durability._invoke_async(task_self, fn, args, kwargs)
+                def run(task_self: CeleryTask, *args: Any, **kwargs: Any) -> Any:
+                    # Prefork calls run synchronously and does not await a coroutine.
+                    return asyncio.run(
+                        durability._invoke_async(task_self, fn, args, kwargs)
+                    )
 
             else:
 
@@ -310,14 +325,17 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         cached = self._stored_result(task_id)
         if cached is not _MISSING:
             return cached
-        with self.container(task_id, task=task):
+        with self.container(task_id, task=task) as leased:
+            if leased is not _MISSING:
+                return leased
             try:
                 value = fn(*args, **kwargs)
-                self._store_result(task_id, value)
+                wrote = self._store_result(task_id, value)
             except Exception as exc:
                 self._note_task_error(task, task_id, exc)
                 raise
-            self._emit(task_id, "succeeded")
+            if wrote:
+                self._emit(task_id, "succeeded")
             return value
 
     async def _invoke_async(
@@ -331,14 +349,17 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         cached = self._stored_result(task_id)
         if cached is not _MISSING:
             return cached
-        with self.container(task_id, task=task):
+        with self.container(task_id, task=task) as leased:
+            if leased is not _MISSING:
+                return leased
             try:
                 value = await fn(*args, **kwargs)
-                self._store_result(task_id, value)
+                wrote = self._store_result(task_id, value)
             except Exception as exc:
                 self._note_task_error(task, task_id, exc)
                 raise
-            self._emit(task_id, "succeeded")
+            if wrote:
+                self._emit(task_id, "succeeded")
             return value
 
     def _stored_result(self, task_id: str) -> object:
@@ -347,7 +368,7 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
             return _MISSING
         return record.payload
 
-    def _store_result(self, task_id: str, value: object) -> None:
+    def _store_result(self, task_id: str, value: object) -> bool:
         token = current_lease_token()
         if token is None:
             raise LeaseLost(f"lease for task {task_id!r} is not held by this caller")
@@ -355,13 +376,15 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
             payload = _json_round_trip(value)
         except (EncodeError, TypeError, ValueError):
             # Celery's default serializer is JSON. The value still returns to
-            # the worker; a duplicate delivery replays steps instead.
+            # the worker; a duplicate delivery replays steps. No succeeded
+            # event, because this delivery did not record a completion.
             logger.warning(
                 "task %s result is not JSON-encodable; completion record skipped",
                 task_id,
             )
-            return
+            return False
         self._store.put_result(task_id, payload, token=token)
+        return True
 
     def _note_task_error(self, task: CeleryTask, task_id: str, exc: Exception) -> None:
         # A probe already recorded `retrying` before raising Retry.

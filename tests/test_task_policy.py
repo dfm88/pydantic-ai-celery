@@ -426,6 +426,38 @@ def test_stored_none_is_returned_without_calling_the_user() -> None:
     assert store.snapshot("task-1").attempt == 1
 
 
+def test_result_stored_before_acquire_is_returned_without_the_user() -> None:
+    app = _app("completion-race")
+    store = MemoryRunStore()
+    durability = CeleryDurability(store)
+    calls = {"user": 0}
+    original_acquire = store.acquire_lease
+
+    def acquire(task_id: str, token: str) -> bool:
+        # The pre-check already missed. The owner stores null and releases
+        # before this delivery's acquire succeeds.
+        if store.get_result(task_id) is None:
+            assert original_acquire(task_id, "owner") is True
+            store.put_result(task_id, None, token="owner")
+            assert store.release_lease(task_id, "owner") is True
+        return original_acquire(task_id, token)
+
+    store.acquire_lease = acquire  # type: ignore[method-assign]
+
+    @durability.task(app)
+    def analyse(prompt: str) -> str:
+        calls["user"] += 1
+        return "ran"
+
+    assert _call(analyse, "hello", task_id="task-1") is None
+    assert calls["user"] == 0
+    assert store.get_result("task-1") is not None
+    assert store.get_result("task-1").payload is None  # type: ignore[union-attr]
+    assert store.snapshot("task-1").attempt == 0
+    assert [event.kind for event in store.read_progress("task-1")] == []
+    assert store.lease_held("task-1") is False
+
+
 def test_second_delivery_returns_the_stored_result() -> None:
     app = _app("completed")
     store = MemoryRunStore()
@@ -448,7 +480,7 @@ def test_second_delivery_returns_the_stored_result() -> None:
     assert store.snapshot("task-1").attempt == 1
 
 
-def test_async_task_stores_the_result() -> None:
+def test_async_task_runs_under_synchronous_task_run() -> None:
     app = _app("async-task")
     store = MemoryRunStore()
     durability = CeleryDurability(store)
@@ -459,11 +491,8 @@ def test_async_task_stores_the_result() -> None:
         calls["user"] += 1
         return prompt
 
-    analyse.push_request(id="task-1", retries=0)
-    try:
-        assert asyncio.run(analyse.run("hello")) == "hello"
-    finally:
-        analyse.pop_request()
+    # Prefork calls task.run directly. It must not need the test to await.
+    assert _call(analyse, "hello", task_id="task-1") == "hello"
     assert calls["user"] == 1
     assert store.get_result("task-1") is not None
     assert store.get_result("task-1").payload == "hello"  # type: ignore[union-attr]
@@ -493,6 +522,44 @@ def test_maintain_lease_returns_when_refresh_sets_stop() -> None:
     thread.start()
     assert finished.wait(timeout=1)
     assert seen == {"task_id": "task-1", "token": "tok"}
+
+
+def test_heartbeat_joins_before_release() -> None:
+    store = MemoryRunStore()
+    settings = DurabilitySettings(lease_heartbeat_s=60, lease_ttl_s=121)
+    durability = CeleryDurability(store, settings=settings)
+    entered = threading.Event()
+    allow_refresh = threading.Event()
+    refresh_returned = threading.Event()
+    original_refresh = store.refresh_lease
+    original_release = store.release_lease
+
+    def refresh(task_id: str, token: str) -> bool:
+        entered.set()
+        assert allow_refresh.wait(timeout=5)
+        try:
+            return original_refresh(task_id, token)
+        finally:
+            refresh_returned.set()
+
+    def release(task_id: str, token: str) -> bool:
+        assert refresh_returned.is_set()
+        alive = [
+            item
+            for item in threading.enumerate()
+            if item.name == _HEARTBEAT_THREAD_NAME and item.is_alive()
+        ]
+        assert alive == []
+        return original_release(task_id, token)
+
+    store.refresh_lease = refresh  # type: ignore[method-assign]
+    store.release_lease = release  # type: ignore[method-assign]
+    with durability.container("task-1"):
+        try:
+            assert entered.wait(timeout=5)
+        finally:
+            allow_refresh.set()
+    assert store.lease_held("task-1") is False
 
 
 def test_container_refreshes_until_it_exits() -> None:
