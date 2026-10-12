@@ -379,6 +379,18 @@ Decorator arguments that try to set `acks_late=False` or `acks_on_failure_or_tim
 - Remove the scaffold `pydantic-ai-celery` console script.
 - No dependency on Temporal, DBOS, or Prefect extras.
 
+### Public repository
+
+The repository is the public library, laid out in the spirit of [pydantic-ai-pgtask](https://github.com/Kludex/pydantic-ai-pgtask): a README that states the problem, the install line, one example, and how replay works; an `examples/` script; `py.typed`; MIT license; ruff and pytest; a CI workflow; a tag-triggered PyPI publish workflow using `uv publish` trusted publishing. Version stays the static `version` in `pyproject.toml`. The package stays in `src/pydantic_ai_celery` because that is the layout this repo already builds with `uv_build`.
+
+Also present, because this repo is meant to be cloned by people and by agents:
+
+- `AGENTS.md` at the repo root. It points at this spec, forbids copying Pydantic AI model or toolset internals, and states the version floors and the `DurabilitySettings` rule.
+- `CONTRIBUTING.md`. How to install the dev environment, run the unit suite, and opt into Redis and Postgres integration tests.
+- `LICENSE`. MIT.
+
+The README example matches `@durability.task` from the user-API section. It shows `durability.progress(task_id)` as the way a producer polls. It does not document a websocket server.
+
 ### Module split
 
 - `_durability.py` — capability, container, task decorator, resume
