@@ -49,7 +49,12 @@ from pydantic_ai_celery._errors import (
     RunInProgress,
     UnitTimeout,
 )
-from pydantic_ai_celery._store import ProgressEvent, ProgressKind, RunStore
+from pydantic_ai_celery._store import (
+    ProgressEvent,
+    ProgressKind,
+    RunStore,
+    run_store_from_url,
+)
 from pydantic_ai_celery._worker_checks import (
     rabbitmq_consumer_timeout_notice,
     worker_config_warnings,
@@ -91,6 +96,9 @@ class ProgressListener(Protocol):
 class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
     """Checkpoint one agent run inside one Celery task.
 
+    ``store`` is a ``RunStore`` or a ``redis://``, ``rediss://``,
+    ``postgresql://``, or ``postgres://`` URL. A URL does not connect, and
+    Postgres tables are not created, until that store's ``setup()`` runs.
     Outside `container()`, the capability is transparent and writes nothing.
     `in_durable_context` follows the container context var only.
     """
@@ -116,7 +124,7 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
 
     def __init__(
         self,
-        store: RunStore,
+        store: RunStore | str,
         *,
         settings: DurabilitySettings | None = None,
         listeners: Sequence[ProgressListener] = (),
@@ -133,8 +141,13 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
             models=models, event_stream_handler=event_stream_handler, name=name
         )
         empty = CeleryOperationConfig()
+        # One settings object for a URL-built store and this capability. An
+        # existing RunStore keeps whatever settings it was built with.
+        resolved = settings if settings is not None else DurabilitySettings()
+        if isinstance(store, str):
+            store = run_store_from_url(store, resolved)
         self._store = store
-        self._settings = settings if settings is not None else DurabilitySettings()
+        self._settings = resolved
         self._listeners = tuple(listeners)
         self._model_config = model_config or empty
         self._tool_config = tool_config or empty
