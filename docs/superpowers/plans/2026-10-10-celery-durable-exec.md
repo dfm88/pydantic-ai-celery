@@ -23,6 +23,12 @@
 - Package path stays `src/pydantic_ai_celery`. Build backend stays `uv_build`. Version stays the static `version` in `pyproject.toml`. License MIT.
 - Remove the `pydantic-ai-celery` console script and `main()`.
 
+## Testing
+
+Not pure TDD. Do not write a failing test before each step, and do not add a test whose subject is packaging, imports, metadata, or whether the README compiles. Task 1 and Task 7 have no test file.
+
+Unit tests cover behavior: settings validation, the memory store, replay, the Celery task policy. Integration tests cover Redis and Postgres, and they skip when `REDIS_URL` or `POSTGRES_URL` is unset. Implement the code and the tests in the same task, then run pytest once.
+
 ## Review Focus
 
 - A second delivery that finds the lease held must not call the user function or the step body. A person would otherwise pay for the same model call twice.
@@ -39,41 +45,24 @@
 - Modify: `pyproject.toml`
 - Modify: `src/pydantic_ai_celery/__init__.py`
 - Create: `src/pydantic_ai_celery/py.typed`
-- Create: `tests/test_packaging.py`
 
 **Interfaces:**
 - Consumes: nothing
 - Produces: an importable `pydantic_ai_celery` package, dev group `pytest` and `ruff`, pytest `testpaths = ["tests"]`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Turn the scaffold into library metadata**
 
-```python
-def test_package_imports_and_has_no_console_script():
-    import pydantic_ai_celery
-    from importlib.metadata import metadata
+In `pyproject.toml`: description `Durable execution for Pydantic AI agents on Celery.`, `license = "MIT"`, README, classifiers for Alpha, Developers, and Python 3.11 through 3.14. Delete `[project.scripts]`. Add a `dev` dependency group with `pytest` and `ruff`, and `[tool.uv] default-groups = ["dev"]`. Add pytest `testpaths`. Replace `src/pydantic_ai_celery/__init__.py` with a module docstring and no `main`. Add an empty `py.typed`. No test for this task.
 
-    assert pydantic_ai_celery.__name__ == 'pydantic_ai_celery'
-    assert 'pydantic-ai-celery' not in (metadata('pydantic-ai-celery').get_all('Console-Script') or [])
-```
+- [ ] **Step 2: Confirm the package installs**
 
-- [ ] **Step 2: Run test to verify it fails**
+Run: `uv sync --group dev && uv run python -c "import pydantic_ai_celery"`
+Expected: exit 0
 
-Run: `uv run pytest tests/test_packaging.py::test_package_imports_and_has_no_console_script -v`
-Expected: FAIL because `tests/` does not exist, or because the console script is still declared.
-
-- [ ] **Step 3: Turn the scaffold into library metadata**
-
-In `pyproject.toml`: description `Durable execution for Pydantic AI agents on Celery.`, `license = "MIT"`, README, classifiers for Alpha, Developers, and Python 3.11 through 3.14. Delete `[project.scripts]`. Add a `dev` dependency group with `pytest` and `ruff`, and `[tool.uv] default-groups = ["dev"]`. Add pytest `testpaths`. Replace `src/pydantic_ai_celery/__init__.py` with a module docstring and no `main`. Add an empty `py.typed`.
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `uv sync --group dev && uv run pytest tests/test_packaging.py::test_package_imports_and_has_no_console_script -v`
-Expected: PASS
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add pyproject.toml src/pydantic_ai_celery/__init__.py src/pydantic_ai_celery/py.typed tests/test_packaging.py uv.lock
+git add pyproject.toml src/pydantic_ai_celery/__init__.py src/pydantic_ai_celery/py.typed uv.lock
 git commit -m "Prepare pydantic-ai-celery as a library package."
 ```
 
@@ -92,44 +81,20 @@ git commit -m "Prepare pydantic-ai-celery as a library package."
   - `DurabilitySettings.resolved_time_limit_s: int | None` returns `soft_time_limit_s + time_limit_grace_s` when soft is set, hard is omitted, and grace is not `None`.
   - `NonRetryableDurabilityError(Exception)`, `DurabilityDivergence(NonRetryableDurabilityError)`, `RunInProgress(Exception)`, `LeaseHeld(Exception)`, `LeaseLost(Exception)`, `UnitTimeout(Exception)`.
 
-- [ ] **Step 1: Write the failing tests**
-
-```python
-def test_defaults_match_the_spec():
-    settings = DurabilitySettings()
-    assert settings.journal_ttl_s == 604800
-    assert settings.lease_ttl_s == 30
-    assert settings.probe_countdown_s == 30
-    assert settings.resolved_time_limit_s is None
-
-def test_heartbeat_must_be_able_to_miss_one_beat():
-    with pytest.raises(ValueError):
-        DurabilitySettings(lease_ttl_s=10, lease_heartbeat_s=5)
-
-def test_grace_fills_an_omitted_hard_limit():
-    settings = DurabilitySettings(soft_time_limit_s=3600)
-    assert settings.resolved_time_limit_s == 3630
-
-def test_hard_limit_must_exceed_soft_limit():
-    with pytest.raises(ValueError):
-        DurabilitySettings(soft_time_limit_s=10, time_limit_s=10)
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/test_settings.py -v`
-Expected: FAIL with import error for `DurabilitySettings`.
-
-- [ ] **Step 3: Implement the dataclass and the exception classes**
+- [ ] **Step 1: Implement the dataclass and the exception classes**
 
 Validate in `__post_init__`. No other module defines these numbers.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Add unit tests for the validation rules**
+
+`tests/test_settings.py` asserts: a heartbeat that cannot miss one beat raises `ValueError`; `soft_time_limit_s=3600` with no hard limit resolves to `3630`; `time_limit_s <= soft_time_limit_s` raises `ValueError`; `probe_countdown_s` follows `lease_ttl_s` when unset. Do not assert every default field.
+
+- [ ] **Step 3: Run the unit tests**
 
 Run: `uv run pytest tests/test_settings.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/pydantic_ai_celery/_config.py src/pydantic_ai_celery/_errors.py tests/test_settings.py
@@ -146,25 +111,20 @@ git commit -m "Add durability settings and error types."
 - Consumes: `DurabilitySettings`
 - Produces: `RunStore` protocol and `MemoryRunStore(settings: DurabilitySettings | None = None)` with `get_step`, `put_step`, `get_result`, `put_result`, `bump_attempt`, `reset_attempts`, `acquire_lease`, `refresh_lease`, `release_lease`, `lease_held`, `bump_probe`, `append_progress`, `read_progress`, `snapshot`. Records use `operation_name` and `payload`. `append_progress` returns the new `seq` starting at 1. `snapshot(task_id)` returns status `unknown` when absent, and `interrupted` when stored status is `running` and the lease is expired. `put_step` raises `LeaseLost` when the caller is not the lease owner and a lease is currently held.
 
-- [ ] **Step 1: Write the failing tests**
-
-Cover: round-trip a step, second acquire fails while the lease is held, acquire succeeds after expiry, refresh keeps it, release lets a new token acquire, progress seq order, `read_progress(after=last)` is empty, running plus expired lease snapshots as `interrupted`.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/test_memory_store.py -v`
-Expected: FAIL with import error for `MemoryRunStore`.
-
-- [ ] **Step 3: Implement `MemoryRunStore`**
+- [ ] **Step 1: Implement `MemoryRunStore`**
 
 Use `time.monotonic` for the lease deadline so tests can expire it by passing a clock callable `now: Callable[[], float]`. Default clock is `time.monotonic`. Do not start a thread.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Add unit tests**
+
+`tests/test_memory_store.py` covers: round-trip a step, second acquire fails while the lease is held, acquire succeeds after expiry, refresh keeps it, release lets a new token acquire, progress seq order, `read_progress(after=last)` is empty, running plus expired lease snapshots as `interrupted`.
+
+- [ ] **Step 3: Run the unit tests**
 
 Run: `uv run pytest tests/test_memory_store.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/pydantic_ai_celery/_store.py tests/test_memory_store.py
@@ -192,9 +152,13 @@ git commit -m "Add the in-memory run store."
 
 `CeleryOperationConfig` is a frozen dataclass with `timeout: float | None = None`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Implement the backend and capability**
 
-Use `TestModel` and `MemoryRunStore`. Assert:
+`execute` increments an in-memory counter on the context before awaiting. Ignore `cache_key`. On a hit with the same operation name, return the stored payload. On a hit with a different name, raise `DurabilityDivergence`. Wrap `body()` in `asyncio.timeout` when the resolved config timeout is not `None`. Append `step_started` and `step_finished` or `step_failed` through the store. A listener error is logged and swallowed.
+
+- [ ] **Step 2: Add unit tests**
+
+`tests/test_replay.py` uses `TestModel` and `MemoryRunStore`. Assert:
 
 - outside `container()`, a tool call writes no step
 - a tool that raises `RuntimeError` on the first container entry journals the model step and not the tool step; the second entry with the same task id does not call the model again and calls the tool body once more
@@ -207,21 +171,12 @@ Use `TestModel` and `MemoryRunStore`. Assert:
 - `CeleryOperationConfig(timeout=0.01)` around a body that waits raises `UnitTimeout` and writes no record
 - `in_durable_context` is false outside the container and true inside it
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/test_replay.py -v`
-Expected: FAIL with import error for `CeleryDurability`.
-
-- [ ] **Step 3: Implement the backend and capability**
-
-`execute` increments an in-memory counter on the context before awaiting. Ignore `cache_key`. On a hit with the same operation name, return the stored payload. On a hit with a different name, raise `DurabilityDivergence`. Wrap `body()` in `asyncio.timeout` when the resolved config timeout is not `None`. Append `step_started` and `step_finished` or `step_failed` through the store. A listener error is logged and swallowed.
-
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 3: Run the unit tests**
 
 Run: `uv run pytest tests/test_replay.py tests/test_memory_store.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/pydantic_ai_celery/_backend.py src/pydantic_ai_celery/_context.py src/pydantic_ai_celery/_durability.py src/pydantic_ai_celery/__init__.py tests/test_replay.py
@@ -247,25 +202,20 @@ git commit -m "Replay journaled agent steps inside a Celery container."
   - `worker_config_warnings(conf: Mapping[str, object], settings: DurabilitySettings) -> list[str]`
   - `republish_probe(task, store, settings) -> None` which bumps the probe counter, raises `NonRetryableDurabilityError` above `lease_probe_max_retries`, calls `signature_from_request` with `countdown=settings.probe_countdown_s` and `retries=task.request.retries`, `apply_async`, then raises `Retry`
 
-- [ ] **Step 1: Write the failing tests**
-
-Assert the decorated task has `acks_late`, `acks_on_failure_or_timeout`, and `reject_on_worker_lost` true, and that passing `acks_late=False` raises `ValueError`. Assert `resolved_time_limit_s` is what the task's `time_limit` becomes. Assert a `LeaseHeld` path calls a fake `signature_from_request` and does not call `Task.retry` or the user function. Assert probe count past `lease_probe_max_retries` raises `NonRetryableDurabilityError`. Assert `max_deliveries` raises before the user function. Assert `resume` clears attempts and `resume` while the lease is held raises `RunInProgress`. Assert `SoftTimeLimitExceeded` raised from a step body writes no record and propagates. Assert `worker_config_warnings` returns a warning when Redis `visibility_timeout` is `3600` and `time_limit_s` is unset, and when prefetch is not `recommended_prefetch`. Assert a failed `apply_async` leaves progress kinds `queued` then `failed`. Assert a second delivery with a stored completion returns that value and does not call the user function. Assert `maintain_lease` calls `refresh_lease` and returns once the store's refresh sets the stop event. Assert `configure_celery_app` sets visibility timeout and prefetch, and constructing the capability leaves `app.conf` unchanged. Assert `agent_queue('agents', 3_600_000).queue_arguments['x-consumer-timeout'] == 3_600_000`.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/test_task_policy.py -v`
-Expected: FAIL because `task` and `resume` are missing.
-
-- [ ] **Step 3: Implement the decorator, probe, resume, and warnings**
+- [ ] **Step 1: Implement the decorator, probe, resume, and warnings**
 
 The decorator checks `completed_result` before entering the container and starts `maintain_lease` on a daemon thread while the container is open. `container()` is not reentrant. Register one `worker_init` handler when `check_worker_config` is true. Do not mutate `app.conf` from the capability constructor.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Add unit tests**
+
+`tests/test_task_policy.py` asserts: the decorated task has `acks_late`, `acks_on_failure_or_timeout`, and `reject_on_worker_lost` true, and `acks_late=False` raises `ValueError`. The task's `time_limit` is `resolved_time_limit_s`. A `LeaseHeld` path calls a fake `signature_from_request` and does not call `Task.retry` or the user function. Probe count past `lease_probe_max_retries` raises `NonRetryableDurabilityError`. `max_deliveries` raises before the user function. `resume` clears attempts, and `resume` while the lease is held raises `RunInProgress`. `SoftTimeLimitExceeded` from a step body writes no record and propagates. `worker_config_warnings` warns when Redis `visibility_timeout` is `3600` and `time_limit_s` is unset, and when prefetch is not `recommended_prefetch`. A failed `apply_async` leaves progress kinds `queued` then `failed`. A second delivery with a stored completion returns that value and does not call the user function. `maintain_lease` calls `refresh_lease` and returns once that refresh sets the stop event. `configure_celery_app` sets visibility timeout and prefetch, and constructing the capability leaves `app.conf` unchanged. `agent_queue('agents', 3_600_000).queue_arguments['x-consumer-timeout'] == 3_600_000`.
+
+- [ ] **Step 3: Run the unit tests**
 
 Run: `uv run pytest tests/test_task_policy.py tests/test_replay.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/pydantic_ai_celery/_durability.py src/pydantic_ai_celery/_worker_checks.py tests/test_task_policy.py
@@ -283,25 +233,20 @@ git commit -m "Apply Celery ack, probe, and resume policy."
 - Consumes: `RunStore`, `DurabilitySettings`, `LeaseLost`
 - Produces: `RedisRunStore(url: str, settings: DurabilitySettings | None = None)`, `PostgresRunStore(url: str, settings: DurabilitySettings | None = None)` with `setup()` and `purge_expired()`. `CeleryDurability` accepts `redis://`, `rediss://`, `postgresql://`, and `postgres://`.
 
-- [ ] **Step 1: Write the failing tests**
-
-Parametrize the memory store cases from Task 3 over `MemoryRunStore` always, and over Redis and Postgres when `REDIS_URL` and `POSTGRES_URL` are set. Skip with `pytest.importorskip` and `pytest.skip` when the extra or the URL is missing. Include `purge_expired` deleting an already-expired step on Postgres, and a lease `UPDATE` that loses to a live token.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/test_store_parity.py -v`
-Expected: FAIL with import error, or the memory parametrization fails until the helper is shared.
-
-- [ ] **Step 3: Implement both stores from the spec layout**
+- [ ] **Step 1: Implement both stores from the spec layout**
 
 Redis keys use `settings.key_prefix` and `journal_ttl_s`. Postgres uses `settings.postgres_schema`, `statement_timestamp()`, and the lease `UPDATE` in the spec. `setup()` is explicit. Expired Postgres rows are invisible to reads. No reaper thread.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Add integration tests**
+
+`tests/test_store_parity.py` runs only when the extra imports and `REDIS_URL` or `POSTGRES_URL` is set. Otherwise the test skips. Do not re-run the memory suite here. Each backend gets one test that acquires a lease, writes a step, reads it back, loses a second acquire while the lease is live, appends a progress event, and reads it by cursor. Postgres also asserts `purge_expired` removes an already-expired step.
+
+- [ ] **Step 3: Run the integration tests**
 
 Run: `uv run pytest tests/test_store_parity.py -v`
-Expected: PASS for memory. Redis and Postgres skip without URLs.
+Expected: PASS, or SKIP when the URL is unset.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/pydantic_ai_celery/_store.py src/pydantic_ai_celery/_durability.py tests/test_store_parity.py
@@ -319,26 +264,12 @@ git commit -m "Add Redis and Postgres run stores."
 - Create: `.github/workflows/ci.yml`
 - Create: `.github/workflows/publish.yml`
 - Modify: `src/pydantic_ai_celery/__init__.py` (export the rest of the public names)
-- Test: `tests/test_packaging.py`
 
 **Interfaces:**
 - Consumes: the public API from Tasks 4–6
 - Produces: the repository surface in the spec's "Public repository" section
 
-- [ ] **Step 1: Write the failing test**
-
-```python
-def test_readme_example_compiles():
-    source = pathlib.Path('examples/durable_run.py').read_text()
-    compile(source, 'examples/durable_run.py', 'exec')
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `uv run pytest tests/test_packaging.py::test_readme_example_compiles -v`
-Expected: FAIL because `examples/durable_run.py` is missing.
-
-- [ ] **Step 3: Write the public surface**
+- [ ] **Step 1: Write the public surface**
 
 `README.md` follows the shape of pydantic-ai-pgtask: one-sentence promise, the crash problem, `pip install pydantic-ai-celery`, one example using `@durability.task` and `durability.progress`, how replay works, the deterministic encounter-order note, and that polling is the progress API. `examples/durable_run.py` is that example and is not executed in unit tests.
 
@@ -352,14 +283,14 @@ Expected: FAIL because `examples/durable_run.py` is missing.
 
 Export every name in the spec's public export list from `pydantic_ai_celery`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Run the unit suite and the linter**
 
-Run: `uv run pytest tests/test_packaging.py -v && uv run ruff check src tests`
-Expected: PASS
+Run: `uv run pytest -v && uv run ruff check src tests`
+Expected: unit tests PASS. Integration tests SKIP without `REDIS_URL` and `POSTGRES_URL`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add README.md AGENTS.md CONTRIBUTING.md LICENSE examples/durable_run.py .github/workflows/ci.yml .github/workflows/publish.yml src/pydantic_ai_celery/__init__.py tests/test_packaging.py
+git add README.md AGENTS.md CONTRIBUTING.md LICENSE examples/durable_run.py .github/workflows/ci.yml .github/workflows/publish.yml src/pydantic_ai_celery/__init__.py
 git commit -m "Document pydantic-ai-celery as a public library."
 ```
