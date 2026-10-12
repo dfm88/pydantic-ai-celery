@@ -5,7 +5,8 @@ from pydantic_ai import Agent
 
 from pydantic_ai_celery import CeleryDurability, configure_celery_app
 
-app = Celery("agents", broker="redis://localhost:6379/0")
+# Celery rewrites __main__ to this, matching the worker's import name.
+app = Celery("examples.durable_run", broker="redis://localhost:6379/0")
 configure_celery_app(app)
 
 # Journal URL. Separate from the broker. A URL does not connect until a store
