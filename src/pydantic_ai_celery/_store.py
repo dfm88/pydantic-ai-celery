@@ -106,7 +106,7 @@ class RunStore(Protocol):
 
     def get_result(self, task_id: str) -> ResultRecord | None: ...
 
-    def put_result(self, task_id: str, payload: Any) -> None: ...
+    def put_result(self, task_id: str, payload: Any, *, token: str) -> None: ...
 
     def bump_attempt(self, task_id: str) -> int: ...
 
@@ -199,7 +199,7 @@ class MemoryRunStore:
     Refresh and release succeed only for the current holder, and refresh does
     not revive an expired lease.
 
-    ``put_step`` raises ``LeaseLost`` unless ``token`` is the live holder.
+    ``put_step`` and ``put_result`` raise ``LeaseLost`` unless ``token`` is the live holder.
     A task that only holds a lease has no journal row: ``snapshot`` stays
     ``unknown`` until a step, result, counter, or progress event is written.
     Stored status ``running`` is read back as ``interrupted`` when that lease
@@ -257,11 +257,18 @@ class MemoryRunStore:
                 return None
             return run.result
 
-    def put_result(self, task_id: str, payload: Any) -> None:
+    def put_result(self, task_id: str, payload: Any, *, token: str) -> None:
         with self._lock:
-            run = self._ensure(task_id)
+            now = self._now()
+            run = self._runs.get(task_id)
+            # Same holder check as put_step, under the write lock. A probe must
+            # not land a completion record between a lost lease and the next owner.
+            if run is None or _holder(run, now) != token:
+                raise LeaseLost(
+                    f"lease for task {task_id!r} is not held by this caller"
+                )
             run.result = ResultRecord(payload=payload)
-            self._touch(run, self._now())
+            self._touch(run, now)
 
     def bump_attempt(self, task_id: str) -> int:
         with self._lock:

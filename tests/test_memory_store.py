@@ -139,9 +139,19 @@ def test_release_lets_a_new_token_acquire() -> None:
 def test_result_round_trip_distinguishes_missing_from_none() -> None:
     store = MemoryRunStore()
     assert store.get_result("task-1") is None
-    store.put_result("task-1", None)
+    with pytest.raises(LeaseLost):
+        store.put_result("task-1", None, token="owner")
+    assert store.get_result("task-1") is None
+    assert store.snapshot("task-1").status == "unknown"
+
+    assert store.acquire_lease("task-1", "owner") is True
+    with pytest.raises(LeaseLost):
+        store.put_result("task-1", "nope", token="other")
+    assert store.get_result("task-1") is None
+
+    store.put_result("task-1", None, token="owner")
     assert store.get_result("task-1") == ResultRecord(payload=None)
-    store.put_result("task-1", {"ok": True})
+    store.put_result("task-1", {"ok": True}, token="owner")
     assert store.get_result("task-1") == ResultRecord(payload={"ok": True})
 
 
