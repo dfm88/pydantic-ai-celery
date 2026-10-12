@@ -52,6 +52,7 @@ from pydantic_ai_celery._errors import (
 from pydantic_ai_celery._store import (
     ProgressEvent,
     ProgressKind,
+    RunSnapshot,
     RunStore,
     run_store_from_url,
 )
@@ -91,6 +92,19 @@ class ProgressListener(Protocol):
     """Called after a progress event is stored. Exceptions are logged and ignored."""
 
     def on_progress(self, event: ProgressEvent) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressPage:
+    """One poll of a task.
+
+    ``next_seq`` is the last event seq in ``events``, or the ``after`` cursor
+    when the page is empty. Pass it back as ``after`` to read the next page.
+    """
+
+    snapshot: RunSnapshot
+    events: tuple[ProgressEvent, ...]
+    next_seq: int | None
 
 
 class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
@@ -233,6 +247,24 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         if record is None:
             return None
         return record.payload
+
+    def progress(
+        self,
+        task_id: str,
+        *,
+        after: int | None = None,
+        limit: int | None = None,
+    ) -> ProgressPage:
+        """Return the snapshot and the progress events after ``after``.
+
+        ``limit`` is passed to the store, which defaults to
+        ``DurabilitySettings.progress_page_limit``. ``next_seq`` is the last
+        event seq in the page, or ``after`` when the page is empty.
+        """
+        snapshot = self._store.snapshot(task_id)
+        events = self._store.read_progress(task_id, after=after, limit=limit)
+        next_seq = events[-1].seq if events else after
+        return ProgressPage(snapshot=snapshot, events=events, next_seq=next_seq)
 
     def task(
         self, app: Celery, **overrides: Any
