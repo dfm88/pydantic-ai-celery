@@ -12,3 +12,4 @@ wheels/
 
 # Agents and tools
 .memsearch
+.claude
