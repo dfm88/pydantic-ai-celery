@@ -781,6 +781,23 @@ CREATE TABLE IF NOT EXISTS {events} (
 )
 """
 
+# Revive locks the expired run, then deletes events and steps. Purge must take
+# the run locks first. Deleting children first is an AB-BA deadlock with that
+# worker, and deadlock_detected is not retried. ORDER BY keeps two purges from
+# locking the same runs in opposite orders. Deletes match _delete_task.
+_PURGE_EXPIRED_SQL = (
+    """
+    SELECT task_id
+    FROM {runs}
+    WHERE expires_at <= statement_timestamp()
+    ORDER BY task_id
+    FOR UPDATE
+    """,
+    "DELETE FROM {events} WHERE expires_at <= statement_timestamp()",
+    "DELETE FROM {steps} WHERE expires_at <= statement_timestamp()",
+    "DELETE FROM {runs} WHERE expires_at <= statement_timestamp()",
+)
+
 
 class RedisRunStore:
     """Redis ``RunStore``.
@@ -1159,14 +1176,16 @@ class PostgresRunStore:
             )
 
     def purge_expired(self) -> int:
-        """Delete expired rows in this schema. Return how many were deleted."""
+        """Delete expired rows in this schema. Return how many were deleted.
+
+        Expired ``runs`` are locked before children, same as ``_delete_task``.
+        """
         removed = 0
         with self._tx() as conn:
-            for statement in (
-                "DELETE FROM {events} WHERE expires_at <= statement_timestamp()",
-                "DELETE FROM {steps} WHERE expires_at <= statement_timestamp()",
-                "DELETE FROM {runs} WHERE expires_at <= statement_timestamp()",
-            ):
+            lock, *deletes = _PURGE_EXPIRED_SQL
+            # Fetch so every FOR UPDATE lock is held before a child delete.
+            self._exec(conn, lock).fetchall()
+            for statement in deletes:
                 removed += self._exec(conn, statement).rowcount
         return removed
 

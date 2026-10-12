@@ -9,6 +9,7 @@ import pytest
 from pydantic_ai_celery._config import DurabilitySettings
 from pydantic_ai_celery._durability import CeleryDurability
 from pydantic_ai_celery._store import (
+    _PURGE_EXPIRED_SQL,
     MemoryRunStore,
     PostgresRunStore,
     RedisRunStore,
@@ -18,6 +19,21 @@ from pydantic_ai_celery._store import (
 )
 
 _TASK_ID = "task-1"
+
+
+def test_purge_locks_expired_runs_before_children() -> None:
+    # No database: revive holds the run row, then deletes events and steps.
+    # Purge has to lock runs first or the two deadlock.
+    statements = [sql.strip() for sql in _PURGE_EXPIRED_SQL]
+    assert statements[0].startswith("SELECT")
+    assert "FROM {runs}" in statements[0]
+    assert "ORDER BY task_id" in statements[0]
+    assert statements[0].rstrip().endswith("FOR UPDATE")
+    assert statements[1:] == [
+        "DELETE FROM {events} WHERE expires_at <= statement_timestamp()",
+        "DELETE FROM {steps} WHERE expires_at <= statement_timestamp()",
+        "DELETE FROM {runs} WHERE expires_at <= statement_timestamp()",
+    ]
 
 
 def test_unsupported_store_url_is_rejected() -> None:
