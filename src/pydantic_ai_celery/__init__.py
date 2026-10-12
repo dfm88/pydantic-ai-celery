@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from pydantic-ai-celery!")
+"""Durable execution for Pydantic AI agents on Celery."""
