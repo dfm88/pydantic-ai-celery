@@ -22,6 +22,7 @@
 - Unit tests use `MemoryRunStore` and `TestModel`. No broker. Redis and Postgres tests skip unless `REDIS_URL` or `POSTGRES_URL` is set.
 - Package path stays `src/pydantic_ai_celery`. Build backend stays `uv_build`. Version stays the static `version` in `pyproject.toml`. License MIT.
 - Remove the `pydantic-ai-celery` console script and `main()`.
+- Commit messages are Conventional Commits: `type: subject`. Types: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`. Imperative subject, no trailing period. Do not sign commits (`git commit` without `-S` or `--gpg-sign`).
 
 ## Testing
 
@@ -63,7 +64,7 @@ Expected: exit 0
 
 ```bash
 git add pyproject.toml src/pydantic_ai_celery/__init__.py src/pydantic_ai_celery/py.typed uv.lock
-git commit -m "Prepare pydantic-ai-celery as a library package."
+git commit -m "chore: prepare the library package metadata"
 ```
 
 ### Task 2: Settings and errors
@@ -98,7 +99,7 @@ Expected: PASS
 
 ```bash
 git add src/pydantic_ai_celery/_config.py src/pydantic_ai_celery/_errors.py tests/test_settings.py
-git commit -m "Add durability settings and error types."
+git commit -m "feat: add durability settings and error types"
 ```
 
 ### Task 3: Memory run store
@@ -128,7 +129,7 @@ Expected: PASS
 
 ```bash
 git add src/pydantic_ai_celery/_store.py tests/test_memory_store.py
-git commit -m "Add the in-memory run store."
+git commit -m "feat: add the in-memory run store"
 ```
 
 ### Task 4: Durable capability and step replay
@@ -180,7 +181,7 @@ Expected: PASS
 
 ```bash
 git add src/pydantic_ai_celery/_backend.py src/pydantic_ai_celery/_context.py src/pydantic_ai_celery/_durability.py src/pydantic_ai_celery/__init__.py tests/test_replay.py
-git commit -m "Replay journaled agent steps inside a Celery container."
+git commit -m "feat: replay journaled agent steps in a celery container"
 ```
 
 ### Task 5: Celery task policy, probe, and resume
@@ -219,7 +220,7 @@ Expected: PASS
 
 ```bash
 git add src/pydantic_ai_celery/_durability.py src/pydantic_ai_celery/_worker_checks.py tests/test_task_policy.py
-git commit -m "Apply Celery ack, probe, and resume policy."
+git commit -m "feat: apply celery ack, probe, and resume policy"
 ```
 
 ### Task 6: Redis and Postgres stores
@@ -250,7 +251,7 @@ Expected: PASS, or SKIP when the URL is unset.
 
 ```bash
 git add src/pydantic_ai_celery/_store.py src/pydantic_ai_celery/_durability.py tests/test_store_parity.py
-git commit -m "Add Redis and Postgres run stores."
+git commit -m "feat: add redis and postgres run stores"
 ```
 
 ### Task 7: README, agent guide, contributing, license, example, CI
@@ -292,5 +293,5 @@ Expected: unit tests PASS. Integration tests SKIP without `REDIS_URL` and `POSTG
 
 ```bash
 git add README.md AGENTS.md CONTRIBUTING.md LICENSE examples/durable_run.py .github/workflows/ci.yml .github/workflows/publish.yml src/pydantic_ai_celery/__init__.py
-git commit -m "Document pydantic-ai-celery as a public library."
+git commit -m "docs: document pydantic-ai-celery as a public library"
 ```
