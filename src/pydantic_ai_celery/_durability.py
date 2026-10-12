@@ -369,19 +369,30 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         task_id = _request_task_id(task)
         cached = self._stored_result(task_id)
         if cached is not _MISSING:
+            self._record_succeeded_if_open(task_id)
             return cached
-        with self.container(task_id, task=task) as leased:
-            if leased is not _MISSING:
-                return leased
-            try:
-                value = fn(*args, **kwargs)
-                wrote = self._store_result(task_id, value)
-            except Exception as exc:
-                self._note_task_error(task, task_id, exc)
-                raise
-            if wrote:
-                self._emit(task_id, "succeeded")
-            return value
+        deferred_retry: Exception | None = None
+        try:
+            with self.container(task_id, task=task) as leased:
+                if leased is not _MISSING:
+                    self._record_succeeded_if_open(task_id)
+                    return leased
+                try:
+                    value = fn(*args, **kwargs)
+                    if self._store_result(task_id, value):
+                        self._record_succeeded_if_open(task_id)
+                except Exception as exc:
+                    if _will_autoretry(task, exc):
+                        # `retrying` cannot leave `running` while the lease is
+                        # held. Record it after the container releases.
+                        deferred_retry = exc
+                    else:
+                        self._note_task_error(task, task_id, exc)
+                    raise
+                return value
+        finally:
+            if deferred_retry is not None:
+                self._note_task_error(task, task_id, deferred_retry)
 
     async def _invoke_async(
         self,
@@ -393,25 +404,41 @@ class CeleryDurability(BaseDurabilityCapability[AgentDepsT]):
         task_id = _request_task_id(task)
         cached = self._stored_result(task_id)
         if cached is not _MISSING:
+            self._record_succeeded_if_open(task_id)
             return cached
-        with self.container(task_id, task=task) as leased:
-            if leased is not _MISSING:
-                return leased
-            try:
-                value = await fn(*args, **kwargs)
-                wrote = self._store_result(task_id, value)
-            except Exception as exc:
-                self._note_task_error(task, task_id, exc)
-                raise
-            if wrote:
-                self._emit(task_id, "succeeded")
-            return value
+        deferred_retry: Exception | None = None
+        try:
+            with self.container(task_id, task=task) as leased:
+                if leased is not _MISSING:
+                    self._record_succeeded_if_open(task_id)
+                    return leased
+                try:
+                    value = await fn(*args, **kwargs)
+                    if self._store_result(task_id, value):
+                        self._record_succeeded_if_open(task_id)
+                except Exception as exc:
+                    if _will_autoretry(task, exc):
+                        deferred_retry = exc
+                    else:
+                        self._note_task_error(task, task_id, exc)
+                    raise
+                return value
+        finally:
+            if deferred_retry is not None:
+                self._note_task_error(task, task_id, deferred_retry)
 
     def _stored_result(self, task_id: str) -> object:
         record = self._store.get_result(task_id)
         if record is None:
             return _MISSING
         return record.payload
+
+    def _record_succeeded_if_open(self, task_id: str) -> None:
+        """Append ``succeeded`` when a stored result is not terminal yet."""
+        status = self._store.snapshot(task_id).status
+        if status in {"succeeded", "failed"}:
+            return
+        self._emit(task_id, "succeeded")
 
     def _store_result(self, task_id: str, value: object) -> bool:
         token = current_lease_token()

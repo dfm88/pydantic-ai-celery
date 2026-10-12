@@ -7,6 +7,7 @@ connect. ``setup()`` is explicit, and nothing here starts a reaper thread.
 
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -215,6 +216,9 @@ class MemoryRunStore:
     ``unknown`` until a step, result, counter, or progress event is written.
     Stored status ``running`` is read back as ``interrupted`` when that lease
     is missing or expired. The stored status is not rewritten.
+    ``append_progress`` always keeps the event. ``queued`` and ``retrying`` do
+    not leave ``running`` while the lease is held. Status stays ``succeeded``
+    or ``failed`` once a result record exists.
     """
 
     def __init__(
@@ -382,17 +386,25 @@ class MemoryRunStore:
                     error_message=stored_error_message,
                 )
             )
-            run.status = status
-            if operation_name is not None:
-                run.last_operation_name = operation_name
-            # Errors stick until the next event that carries some, or success.
-            # A step or retry event with no error must not wipe the last one.
-            if kind == "succeeded":
-                run.error_type = None
-                run.error_message = None
-            elif error_type is not None or error_message is not None:
-                run.error_type = error_type
-                run.error_message = error_message
+            # The event is kept either way. A duplicate `retrying` or a late
+            # `queued` must not clobber the owner's snapshot.
+            if not _status_is_sticky(
+                run.status,
+                status,
+                lease_held=_holder(run, now) is not None,
+                has_result=run.result is not None,
+            ):
+                run.status = status
+                if operation_name is not None:
+                    run.last_operation_name = operation_name
+                # Errors stick until the next event that carries some, or success.
+                # A step or retry event with no error must not wipe the last one.
+                if kind == "succeeded":
+                    run.error_type = None
+                    run.error_message = None
+                elif error_type is not None or error_message is not None:
+                    run.error_type = error_type
+                    run.error_message = error_message
             run.updated_at = now
             return seq
 
@@ -473,6 +485,28 @@ def _stored_status(kind: str) -> _StoredStatus:
         return _STATUS_BY_KIND[kind]  # type: ignore[index]
     except KeyError:
         raise ValueError(f"unknown progress kind {kind!r}") from None
+
+
+def _status_is_sticky(
+    current: str | None,
+    proposed: _StoredStatus,
+    *,
+    lease_held: bool,
+    has_result: bool,
+) -> bool:
+    """True when ``proposed`` must not replace the stored snapshot status.
+
+    ``queued`` and ``retrying`` must not leave ``running`` while the lease is
+    held. ``succeeded`` and ``failed`` still apply then: the owner writes them
+    before release, and a poller would otherwise read ``interrupted``.
+    """
+    if current == "running" and lease_held and proposed not in {
+        "running",
+        "succeeded",
+        "failed",
+    }:
+        return True
+    return current in {"succeeded", "failed"} and has_result and proposed != current
 
 
 def _lease_lost(task_id: str) -> LeaseLost:
@@ -700,28 +734,48 @@ return 1
 """
 )
 
-# The event key is ``prefix .. seq``. The sequence is chosen inside the script,
-# so that key cannot be named in KEYS ahead of time. Standalone Redis allows
-# it. Redis Cluster rejects a key that was not declared.
+# KEYS[3] is the event key for ``expected + 1``. A concurrent append moves the
+# sequence; return -1 before any write so the caller can pass the new key.
+# Cluster rejects a key named only inside the script. Status matches
+# ``_status_is_sticky``. KEYS[4] is the lease and KEYS[5] is the result.
 _REDIS_APPEND = (
     _REDIS_LUA_PRELUDE
     + """
+local expected = tonumber(ARGV[10])
+local current_seq = tonumber(redis.call('GET', KEYS[1])) or 0
+if current_seq ~= expected then
+  return -1
+end
 local ttl = tonumber(ARGV[1])
 local task_id = ARGV[2]
+local proposed = ARGV[3]
 local snap = load_snap(KEYS[2], task_id)
-snap.status = ARGV[3]
-snap.task_id = task_id
-if ARGV[4] == 'set' then
-  snap.last_operation_name = ARGV[5]
+local current = snap.status
+local lease_held = redis.call('EXISTS', KEYS[4]) == 1
+local has_result = redis.call('EXISTS', KEYS[5]) == 1
+local sticky = false
+if current == 'running' and lease_held and proposed ~= 'running'
+    and proposed ~= 'succeeded' and proposed ~= 'failed' then
+  sticky = true
+elseif (current == 'succeeded' or current == 'failed')
+    and has_result and proposed ~= current then
+  sticky = true
 end
-if ARGV[6] == 'clear' then
-  snap.error_type = cjson.null
-  snap.error_message = cjson.null
-elseif ARGV[6] == 'set' then
-  snap.error_type = cjson.decode(ARGV[7])
-  snap.error_message = cjson.decode(ARGV[8])
+if not sticky then
+  snap.status = proposed
+  if ARGV[4] == 'set' then
+    snap.last_operation_name = ARGV[5]
+  end
+  if ARGV[6] == 'clear' then
+    snap.error_type = cjson.null
+    snap.error_message = cjson.null
+  elseif ARGV[6] == 'set' then
+    snap.error_type = cjson.decode(ARGV[7])
+    snap.error_message = cjson.decode(ARGV[8])
+  end
 end
 local now = now_seconds()
+snap.task_id = task_id
 snap.updated_at = now
 local seq = redis.call('INCR', KEYS[1])
 redis.call('EXPIRE', KEYS[1], ttl)
@@ -730,7 +784,7 @@ event.seq = seq
 event.at = now
 event.task_id = task_id
 save_snap(KEYS[2], snap, ttl)
-redis.call('SET', ARGV[10] .. tostring(seq), cjson.encode(event), 'EX', ttl)
+redis.call('SET', KEYS[3], cjson.encode(event), 'EX', ttl)
 return seq
 """
 )
@@ -802,18 +856,23 @@ _PURGE_EXPIRED_SQL = (
 class RedisRunStore:
     """Redis ``RunStore``.
 
-    Keys are ``{key_prefix}:{task_id}:...``. Step, result, attempt, probe,
-    snapshot, and event keys expire after ``journal_ttl_s``, refreshed on the
-    write that touches that key. The lease key uses ``lease_ttl_s`` and is not
-    a journal row: ``snapshot`` stays ``unknown`` until a step, result,
-    counter, or progress event is written.
+    Keys look like ``prefix:{task_id}:lease``. The task id is a Redis hash
+    tag, so every key for one run shares a cluster slot. Standalone Redis
+    keeps the braces as part of the name. Lua only reads and writes keys
+    passed in ``KEYS``, including each ``event:{seq}`` key. Step, result,
+    attempt, probe, snapshot, and event keys expire after ``journal_ttl_s``,
+    refreshed on the write that touches that key. The lease key uses
+    ``lease_ttl_s`` and is not a journal row: ``snapshot`` stays ``unknown``
+    until a step, result, counter, or progress event is written.
 
     ``put_step`` and ``put_result`` check the lease and write in one Lua
     script. They raise ``LeaseLost`` unless ``token`` is the live holder.
     ``acquire_lease`` lets the same token slide the TTL. A different live
     token gets ``False``. ``refresh_lease`` does not revive an expired lease.
     Stored status ``running`` is read back as ``interrupted`` when the lease
-    key is missing. The stored status is not rewritten.
+    key is missing. The stored status is not rewritten. ``queued`` and
+    ``retrying`` do not leave ``running`` while the lease key exists. Status
+    stays ``succeeded`` or ``failed`` once the result key exists.
 
     ``setup()`` pings. ``purge_expired()`` is a no-op: Redis drops keys at
     their TTL, and this class does not start a thread. Payloads are JSON.
@@ -989,24 +1048,36 @@ class RedisRunStore:
             "error_type": None if clear_errors else error_type,
             "error_message": None if clear_errors else error_message,
         }
-        seq = self._eval(
-            "append",
-            _REDIS_APPEND,
-            [self._key(task_id, "event_seq"), self._key(task_id, "snapshot")],
-            [
-                self._settings.journal_ttl_s,
-                task_id,
-                status,
-                "set" if operation_name is not None else "keep",
-                operation_name or "",
-                err_mode,
-                json.dumps(None if clear_errors else error_type),
-                json.dumps(None if clear_errors else error_message),
-                json.dumps(event),
-                self._key(task_id, "event") + ":",
-            ],
-        )
-        return int(seq)
+        args = [
+            self._settings.journal_ttl_s,
+            task_id,
+            status,
+            "set" if operation_name is not None else "keep",
+            operation_name or "",
+            err_mode,
+            json.dumps(None if clear_errors else error_type),
+            json.dumps(None if clear_errors else error_message),
+            json.dumps(event),
+        ]
+        while True:
+            raw_seq = self._redis().get(self._key(task_id, "event_seq"))
+            expected = 0 if raw_seq is None else int(raw_seq)
+            seq = self._eval(
+                "append",
+                _REDIS_APPEND,
+                [
+                    self._key(task_id, "event_seq"),
+                    self._key(task_id, "snapshot"),
+                    self._key(task_id, "event", str(expected + 1)),
+                    self._key(task_id, "lease"),
+                    self._key(task_id, "result"),
+                ],
+                [*args, expected],
+            )
+            seq = int(seq)
+            # Another writer took this sequence. The event key would be wrong.
+            if seq != -1:
+                return seq
 
     def read_progress(
         self,
@@ -1053,7 +1124,11 @@ class RedisRunStore:
         return int(value)
 
     def _key(self, task_id: str, *parts: str) -> str:
-        return ":".join((self._settings.key_prefix, task_id, *parts))
+        # `{task_id}` is the hash tag. The slot is the task, not the prefix.
+        head = f"{self._settings.key_prefix}:{{{task_id}}}"
+        if not parts:
+            return head
+        return ":".join((head, *parts))
 
     def _redis(self) -> Any:
         if self._client is None:
@@ -1127,7 +1202,13 @@ class PostgresRunStore:
     progress append so a finished payload cannot come back after the journal
     TTL. ``put_step`` and ``put_result`` raise ``LeaseLost`` unless ``token``
     holds a live lease. Stored status ``running`` is read back as
-    ``interrupted`` when that lease is missing or due.
+    ``interrupted`` when that lease is missing or due. ``queued`` and
+    ``retrying`` do not leave ``running`` while the lease is held. Status
+    stays ``succeeded`` or ``failed`` once a result is stored.
+
+    One connection is opened on first use. Celery prefork forks after import.
+    A connection opened in the parent is not used after the pid changes, and
+    it is not closed: ``close()`` would send Terminate on the parent's socket.
     """
 
     def __init__(
@@ -1152,6 +1233,9 @@ class PostgresRunStore:
         self._events_expires_idx = sql.Identifier("progress_events_expires_at_idx")
         self._lock = threading.Lock()
         self._conn: Any = None
+        self._conn_pid: int | None = None
+        # Inherited across fork. Held so the destructor does not touch the socket.
+        self._orphans: list[Any] = []
 
     def setup(self) -> None:
         """Create the schema and tables. Safe to call more than once."""
@@ -1410,6 +1494,40 @@ class PostgresRunStore:
         ttl = self._settings.journal_ttl_s
         with self._tx() as conn:
             self._revive_or_insert(conn, task_id)
+            current = self._exec(
+                conn,
+                """
+                SELECT
+                    status,
+                    result IS NOT NULL AS has_result,
+                    (
+                        lease_token IS NOT NULL
+                        AND lease_until >= statement_timestamp()
+                    ) AS lease_held
+                FROM {runs}
+                WHERE task_id = %s
+                FOR UPDATE
+                """,
+                (task_id,),
+            ).fetchone()
+            if current is None:
+                raise RuntimeError(f"progress append lost task {task_id!r}")
+            sticky = _status_is_sticky(
+                current["status"],
+                status,
+                lease_held=bool(current["lease_held"]),
+                has_result=bool(current["has_result"]),
+            )
+            if sticky:
+                stored_status = current["status"]
+                set_operation = False
+                clear_now = False
+                set_error = False
+            else:
+                stored_status = status
+                set_operation = operation_name is not None
+                clear_now = clear_errors
+                set_error = has_error
             row = self._exec(
                 conn,
                 """
@@ -1436,14 +1554,14 @@ class PostgresRunStore:
                 RETURNING event_seq, updated_at
                 """,
                 (
-                    status,
-                    operation_name is not None,
+                    stored_status,
+                    set_operation,
                     operation_name,
-                    clear_errors,
-                    has_error,
+                    clear_now,
+                    set_error,
                     stored_error_type,
-                    clear_errors,
-                    has_error,
+                    clear_now,
+                    set_error,
                     stored_error_message,
                     ttl,
                     task_id,
@@ -1710,12 +1828,20 @@ class PostgresRunStore:
                     raise
 
     def _connection(self) -> Any:
+        pid = os.getpid()
         conn = self._conn
+        if conn is not None and self._conn_pid != pid:
+            # Prefork inherited this socket. Do not use it and do not close it.
+            self._orphans.append(conn)
+            self._conn = None
+            self._conn_pid = None
+            conn = None
         if conn is None or conn.closed:
             conn = self._psycopg.connect(
                 self._url, autocommit=False, row_factory=self._dict_row
             )
             self._conn = conn
+            self._conn_pid = pid
         return conn
 
     def _rollback(self, conn: Any) -> None:
@@ -1728,8 +1854,13 @@ class PostgresRunStore:
 
     def _discard_connection(self) -> None:
         conn = self._conn
+        opened_by = self._conn_pid
         self._conn = None
+        self._conn_pid = None
         if conn is None:
+            return
+        if opened_by != os.getpid():
+            self._orphans.append(conn)
             return
         try:
             if not conn.closed:

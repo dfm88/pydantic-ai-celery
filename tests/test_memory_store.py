@@ -310,3 +310,51 @@ def test_terminal_status_survives_lease_expiry() -> None:
     assert succeeded.error_type is None
     assert succeeded.error_message is None
     assert store.lease_held("task-1") is False
+
+
+def test_leased_running_and_stored_success_keep_their_status() -> None:
+    store = MemoryRunStore()
+    assert store.acquire_lease("task-1", "owner") is True
+    store.append_progress("task-1", "started")
+    store.append_progress(
+        "task-1",
+        "step_finished",
+        operation_name="model_request",
+        step_index=0,
+    )
+    store.append_progress(
+        "task-1",
+        "retrying",
+        error_type="LeaseHeld",
+        error_message="held",
+    )
+    store.append_progress("task-1", "queued", operation_name="publish")
+    running = store.snapshot("task-1")
+    assert running.status == "running"
+    assert running.last_operation_name == "model_request"
+    assert running.error_type is None
+    assert running.error_message is None
+    assert [event.kind for event in store.read_progress("task-1")] == [
+        "started",
+        "step_finished",
+        "retrying",
+        "queued",
+    ]
+
+    store.put_result("task-1", "done", token="owner")
+    assert store.release_lease("task-1", "owner") is True
+    store.append_progress("task-1", "succeeded")
+    assert store.snapshot("task-1").status == "succeeded"
+    store.append_progress("task-1", "queued")
+    finished = store.snapshot("task-1")
+    assert finished.status == "succeeded"
+    assert finished.error_type is None
+    assert finished.last_operation_name == "model_request"
+    assert [event.kind for event in store.read_progress("task-1")] == [
+        "started",
+        "step_finished",
+        "retrying",
+        "queued",
+        "succeeded",
+        "queued",
+    ]

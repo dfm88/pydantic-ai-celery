@@ -207,6 +207,7 @@ def test_max_deliveries_raises_before_the_user_function() -> None:
     assert calls["user"] == 0
     assert store.lease_held("task-1") is False
     assert [event.kind for event in store.read_progress("task-1")] == ["failed"]
+    assert store.snapshot("task-1").status == "failed"
 
 
 def test_resume_clears_attempts_and_reuses_the_task_id() -> None:
@@ -389,6 +390,7 @@ def test_terminal_failure_records_failed_and_releases_the_lease() -> None:
     assert events[-1].error_message == "boom"
     assert store.get_result("task-1") is None
     assert store.lease_held("task-1") is False
+    assert store.snapshot("task-1").status == "failed"
 
 
 def test_retryable_failure_records_retrying() -> None:
@@ -406,6 +408,7 @@ def test_retryable_failure_records_retrying() -> None:
     assert [event.kind for event in events] == ["started", "retrying"]
     assert store.get_result("task-1") is None
     assert store.lease_held("task-1") is False
+    assert store.snapshot("task-1").status == "retrying"
 
 
 def test_stored_none_is_returned_without_calling_the_user() -> None:
@@ -454,7 +457,8 @@ def test_result_stored_before_acquire_is_returned_without_the_user() -> None:
     assert store.get_result("task-1") is not None
     assert store.get_result("task-1").payload is None  # type: ignore[union-attr]
     assert store.snapshot("task-1").attempt == 0
-    assert [event.kind for event in store.read_progress("task-1")] == []
+    assert [event.kind for event in store.read_progress("task-1")] == ["succeeded"]
+    assert store.snapshot("task-1").status == "succeeded"
     assert store.lease_held("task-1") is False
 
 
@@ -474,10 +478,15 @@ def test_second_delivery_returns_the_stored_result() -> None:
     assert store.get_result("task-1") is not None
     assert store.get_result("task-1").payload == "done"  # type: ignore[union-attr]
     assert store.lease_held("task-1") is False
+    assert store.snapshot("task-1").status == "succeeded"
+    kinds = [event.kind for event in store.read_progress("task-1")]
+    assert kinds == ["started", "succeeded"]
 
     assert _call(analyse, "hello", task_id="task-1") == "done"
     assert calls["user"] == 1
     assert store.snapshot("task-1").attempt == 1
+    assert [event.kind for event in store.read_progress("task-1")] == kinds
+    assert store.snapshot("task-1").status == "succeeded"
 
 
 def test_async_task_runs_under_synchronous_task_run() -> None:
@@ -497,6 +506,7 @@ def test_async_task_runs_under_synchronous_task_run() -> None:
     assert store.get_result("task-1") is not None
     assert store.get_result("task-1").payload == "hello"  # type: ignore[union-attr]
     assert store.lease_held("task-1") is False
+    assert store.snapshot("task-1").status == "succeeded"
 
 
 def test_maintain_lease_returns_when_refresh_sets_stop() -> None:

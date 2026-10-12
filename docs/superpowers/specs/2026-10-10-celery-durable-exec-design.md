@@ -171,7 +171,7 @@ There is no default URL.
 
 #### Redis layout
 
-Prefix is `settings.key_prefix` (default `pydantic-ai-celery`).
+Prefix is `settings.key_prefix` (default `pydantic-ai-celery`). `{task_id}` in the table is a Redis hash tag: the key contains `{`, the task id, and `}`. A lease key looks like `pydantic-ai-celery:{task-id}:lease`. Standalone Redis treats those braces as part of the name. Every key a Lua script reads or writes is passed in `KEYS`, including `event:{seq}`.
 
 | Key | Value |
 |---|---|

@@ -215,6 +215,118 @@ def _postgres_step_count(url: str, schema: str) -> int:
     return int(row[0])
 
 
+def test_redis_keys_hash_tag_the_task_and_append_declares_the_event_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RedisModule:
+        class Redis:
+            @staticmethod
+            def from_url(*_args: object, **_kwargs: object) -> object:
+                raise AssertionError("this test must not open a Redis connection")
+
+    class _Client:
+        def __init__(self) -> None:
+            self._seqs = [None, "1"]
+
+        def get(self, key: str) -> str | None:
+            assert key == "pydantic-ai-celery:{task-1}:event_seq"
+            if self._seqs:
+                return self._seqs.pop(0)
+            return "1"
+
+    monkeypatch.setattr(
+        "pydantic_ai_celery._store._load_redis", lambda: _RedisModule
+    )
+    store = RedisRunStore("redis://localhost:6379/0")
+    assert store._key("task-1", "lease") == "pydantic-ai-celery:{task-1}:lease"
+    assert store._key("task-1", "event", "3") == (
+        "pydantic-ai-celery:{task-1}:event:3"
+    )
+    client = _Client()
+    store._redis = lambda: client  # type: ignore[method-assign]
+    seen: list[tuple[list[str], str]] = []
+
+    def fake_eval(
+        name: str, source: str, keys: list[str], args: list[object]
+    ) -> int:
+        del name, args
+        seen.append((keys, source))
+        return -1 if len(seen) == 1 else 2
+
+    store._eval = fake_eval  # type: ignore[method-assign]
+    assert store.append_progress("task-1", "queued") == 2
+    assert [call[0][2] for call in seen] == [
+        "pydantic-ai-celery:{task-1}:event:1",
+        "pydantic-ai-celery:{task-1}:event:2",
+    ]
+    keys, source = seen[0]
+    assert keys == [
+        "pydantic-ai-celery:{task-1}:event_seq",
+        "pydantic-ai-celery:{task-1}:snapshot",
+        "pydantic-ai-celery:{task-1}:event:1",
+        "pydantic-ai-celery:{task-1}:lease",
+        "pydantic-ai-celery:{task-1}:result",
+    ]
+    assert "KEYS[3]" in source
+    assert "KEYS[4]" in source
+    assert "KEYS[5]" in source
+    assert ".." not in source
+
+
+def test_postgres_reconnects_when_the_remembered_pid_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Conn:
+        def __init__(self) -> None:
+            self.closed = False
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    class _Psycopg:
+        def __init__(self) -> None:
+            self.connected: list[_Conn] = []
+
+        def connect(self, *_args: object, **_kwargs: object) -> _Conn:
+            conn = _Conn()
+            self.connected.append(conn)
+            return conn
+
+    class _Identifier:
+        def __init__(self, *parts: object) -> None:
+            self.parts = parts
+
+    class _SQL:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def format(self, **_kwargs: object) -> object:
+            return self
+
+    class _Sql:
+        Identifier = _Identifier
+        SQL = _SQL
+
+    psycopg = _Psycopg()
+    monkeypatch.setattr(
+        "pydantic_ai_celery._store._load_psycopg",
+        lambda: (psycopg, _Sql, None, None),
+    )
+    store = PostgresRunStore("postgresql://localhost/db")
+    inherited = _Conn()
+    store._conn = inherited
+    store._conn_pid = os.getpid() + 1
+    current = store._connection()
+    assert current is not inherited
+    assert current is psycopg.connected[0]
+    assert inherited.close_calls == 0
+    assert store._connection() is current
+    assert store._conn_pid == os.getpid()
+    assert len(psycopg.connected) == 1
+
+
 def _drop_postgres_schema(url: str, schema: str) -> None:
     import psycopg
     from psycopg import sql
