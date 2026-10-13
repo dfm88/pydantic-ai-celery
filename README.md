@@ -34,13 +34,13 @@ from pydantic_ai_celery import (
 )
 
 # Celery rewrites __main__ to this, matching the worker's import name.
-app = Celery("examples.durable_run", broker="redis://localhost:6379/0")
+app = Celery("examples.durable_run", broker="redis://localhost:6389/0")
 configure_celery_app(app)
 
 settings = DurabilitySettings()
 # Journal URL. Separate from the broker. A URL does not connect until a store
 # command, and the string itself has no setup().
-durability = CeleryDurability("redis://localhost:6379/1", settings=settings)
+durability = CeleryDurability("redis://localhost:6389/1", settings=settings)
 agent = Agent("openai:gpt-5", name="analyst", capabilities=[durability])
 
 
@@ -78,9 +78,81 @@ if __name__ == "__main__":
 
 Polling that cursor is the progress API. `durability.progress(task_id)` returns the snapshot, the events after `after`, and `next_seq` to pass back as `after`. The library does not open a websocket. A frontend that wants push registers a `ProgressListener` and still catches up with this call.
 
+## Local services
+
+This repository has its own Redis and Postgres. They are not the databases of other projects. Host ports are 6389 and 5444.
+
+```bash
+docker compose up -d
+```
+
+Broker `redis://localhost:6389/0`. Journal `redis://localhost:6389/1`. Postgres `postgresql://celery:celery@localhost:5444/celery`.
+
+The OpenAI example needs `OPENAI_API_KEY`. Start the worker in the foreground with a solo pool so one process runs the task:
+
+```bash
+uv run celery -A examples.durable_run:app worker --pool=solo --loglevel=info
+```
+
+In another terminal, from the repository root: `uv run python examples/durable_run.py`.
+
+`examples/trace_local.py` needs neither a key nor Docker. TestModel and an in-memory journal run the same container in this process:
+
+```bash
+uv run python examples/trace_local.py
+```
+
+## Flow
+
+A producer publishes one Celery task. The worker acquires a lease, then the agent loop runs. Each model request and each tool call is one journal step, numbered from zero in the order the loop reaches them. The task result is stored before the lease is released. `progress(task_id)` reads that journal. It does not read Celery's result backend.
+
+Weather question, first delivery. The model asks for a lookup, the tool runs, the model answers.
+
+```mermaid
+sequenceDiagram
+    participant Producer
+    participant Broker
+    participant Worker
+    participant Journal
+    participant Model
+
+    Producer->>Journal: queued
+    Producer->>Broker: analyse.delay
+    Broker->>Worker: task id
+    Worker->>Journal: lease, started
+    Worker->>Model: model request
+    Worker->>Journal: step 0 response
+    Worker->>Model: lookup tool
+    Worker->>Journal: step 1 tool result
+    Worker->>Model: model request
+    Worker->>Journal: step 2 final answer
+    Worker->>Journal: result, succeeded
+    Worker->>Broker: ack
+    Producer->>Journal: progress
+```
+
+The worker dies after step 0 is stored and before the tool is stored. Celery redelivers the same task id. The new process starts the agent at the top. Step 0 comes back from the journal and the model is not called again. The tool runs and is stored as step 1.
+
+```mermaid
+sequenceDiagram
+    participant Broker
+    participant First as Worker, then dies
+    participant Second as Redelivered worker
+    participant Journal
+
+    First->>Journal: step 0 stored
+    Note over First: crash before the tool write
+    Broker->>Second: same task id
+    Second->>Journal: lease, encounter starts at 0
+    Journal-->>Second: step 0, no model call
+    Second->>Journal: step 1, tool runs
+```
+
+A crash after the tool's side effect and before its journal write runs that tool again. Keep tool side effects idempotent.
+
 ## Replay
 
-One Celery task is the container. Each model request and tool call is a journal step. A redelivery of that task returns the stored steps and runs only the step that was not journaled.
+One Celery task is the container. Each model request and tool call is a journal step. A redelivery returns every stored step and runs the steps that were not stored. A step whose side effect happened and whose journal write did not is run again.
 
 ## Determinism
 

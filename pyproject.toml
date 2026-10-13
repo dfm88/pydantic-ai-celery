@@ -27,6 +27,7 @@ postgres = ["psycopg[binary]>=3.2"]
 
 [dependency-groups]
 dev = [
+    "ipdb>=0.13.13",
     "pytest",
     "ruff",
 ]

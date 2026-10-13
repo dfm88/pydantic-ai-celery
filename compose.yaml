@@ -1,0 +1,15 @@
+name: pydantic-ai-celery
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6389:6379"
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: celery
+      POSTGRES_PASSWORD: celery
+      POSTGRES_DB: celery
+    ports:
+      - "5444:5432"

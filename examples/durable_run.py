@@ -10,13 +10,13 @@ from pydantic_ai_celery import (
 )
 
 # Celery rewrites __main__ to this, matching the worker's import name.
-app = Celery("examples.durable_run", broker="redis://localhost:6379/0")
+app = Celery("examples.durable_run", broker="redis://localhost:6389/0")
 configure_celery_app(app)
 
 settings = DurabilitySettings()
 # Journal URL. Separate from the broker. A URL does not connect until a store
 # command, and the string itself has no setup().
-durability = CeleryDurability("redis://localhost:6379/1", settings=settings)
+durability = CeleryDurability("redis://localhost:6389/1", settings=settings)
 agent = Agent("openai:gpt-5", name="analyst", capabilities=[durability])
 
 
