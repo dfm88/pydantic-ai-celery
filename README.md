@@ -84,9 +84,10 @@ This repository has its own Redis and Postgres. They are not the databases of ot
 
 ```bash
 docker compose up -d
+cp .env.example .env
 ```
 
-Broker `redis://localhost:6389/0`. Journal `redis://localhost:6389/1`. Postgres `postgresql://celery:celery@localhost:5444/celery`.
+`.env.example` points at this Compose stack: broker `redis://localhost:6389/0`, journal `redis://localhost:6389/1`, Postgres `postgresql://celery:celery@localhost:5444/celery`. Put `OPENAI_API_KEY` in `.env` for the OpenAI example. `examples/durable_run.py` and the test suite load `.env`. A variable already exported in the shell wins.
 
 The OpenAI example needs `OPENAI_API_KEY`. Start the worker in the foreground with a solo pool so one process runs the task:
 

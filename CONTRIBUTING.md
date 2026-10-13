@@ -16,11 +16,10 @@ Integration tests use this repository's Compose services, not another project's 
 
 ```bash
 docker compose up -d
-REDIS_URL=redis://localhost:6389/1 \
-POSTGRES_URL=postgresql://celery:celery@localhost:5444/celery \
-  uv run pytest tests/test_store_parity.py -q
+cp .env.example .env
+uv run pytest tests/test_store_parity.py -q
 ```
 
-Without those variables the Redis and Postgres tests skip.
+`.env` is gitignored. The example file has the Compose URLs. Without `REDIS_URL` and `POSTGRES_URL` the Redis and Postgres tests skip. A variable already set in the shell is not replaced by `.env`.
 
 `examples/trace_local.py` runs one agent with TestModel and an in-memory journal. `examples/durable_run.py` needs the Compose Redis and `OPENAI_API_KEY`. The worker has to be `--pool=solo` if you want a debugger in that process.

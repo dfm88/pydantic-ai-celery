@@ -1,6 +1,9 @@
+import os
 import time
+from pathlib import Path
 
 from celery import Celery
+from dotenv import load_dotenv
 from pydantic_ai import Agent
 
 from pydantic_ai_celery import (
@@ -9,14 +12,22 @@ from pydantic_ai_celery import (
     configure_celery_app,
 )
 
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
 # Celery rewrites __main__ to this, matching the worker's import name.
-app = Celery("examples.durable_run", broker="redis://localhost:6389/0")
+app = Celery(
+    "examples.durable_run",
+    broker=os.environ.get("CELERY_BROKER_URL", "redis://localhost:6389/0"),
+)
 configure_celery_app(app)
 
 settings = DurabilitySettings()
 # Journal URL. Separate from the broker. A URL does not connect until a store
 # command, and the string itself has no setup().
-durability = CeleryDurability("redis://localhost:6389/1", settings=settings)
+durability = CeleryDurability(
+    os.environ.get("REDIS_URL", "redis://localhost:6389/1"),
+    settings=settings,
+)
 agent = Agent("openai:gpt-5", name="analyst", capabilities=[durability])
 
 
