@@ -500,11 +500,16 @@ def _status_is_sticky(
     held. ``succeeded`` and ``failed`` still apply then: the owner writes them
     before release, and a poller would otherwise read ``interrupted``.
     """
-    if current == "running" and lease_held and proposed not in {
-        "running",
-        "succeeded",
-        "failed",
-    }:
+    if (
+        current == "running"
+        and lease_held
+        and proposed
+        not in {
+            "running",
+            "succeeded",
+            "failed",
+        }
+    ):
         return True
     return current in {"succeeded", "failed"} and has_result and proposed != current
 
@@ -878,9 +883,7 @@ class RedisRunStore:
     their TTL, and this class does not start a thread. Payloads are JSON.
     """
 
-    def __init__(
-        self, url: str, settings: DurabilitySettings | None = None
-    ) -> None:
+    def __init__(self, url: str, settings: DurabilitySettings | None = None) -> None:
         self._redis_mod = _load_redis()
         self._url = url
         self._settings = settings if settings is not None else DurabilitySettings()
@@ -932,9 +935,7 @@ class RedisRunStore:
             [
                 token,
                 self._settings.journal_ttl_s,
-                json.dumps(
-                    {"operation_name": operation_name, "payload": payload}
-                ),
+                json.dumps({"operation_name": operation_name, "payload": payload}),
                 operation_name,
                 task_id,
             ],
@@ -1138,9 +1139,7 @@ class RedisRunStore:
             )
         return self._client
 
-    def _eval(
-        self, name: str, source: str, keys: list[str], args: list[Any]
-    ) -> Any:
+    def _eval(self, name: str, source: str, keys: list[str], args: list[Any]) -> Any:
         client = self._redis()
         script = self._scripts.get(name)
         if script is None:
@@ -1211,9 +1210,7 @@ class PostgresRunStore:
     it is not closed: ``close()`` would send Terminate on the parent's socket.
     """
 
-    def __init__(
-        self, url: str, settings: DurabilitySettings | None = None
-    ) -> None:
+    def __init__(self, url: str, settings: DurabilitySettings | None = None) -> None:
         psycopg, sql, dict_row, jsonb = _load_psycopg()
         self._psycopg = psycopg
         self._sql = sql
@@ -1292,9 +1289,7 @@ class PostgresRunStore:
             ).fetchone()
         if row is None:
             return None
-        return StepRecord(
-            operation_name=row["operation_name"], payload=row["payload"]
-        )
+        return StepRecord(operation_name=row["operation_name"], payload=row["payload"])
 
     def put_step(
         self,

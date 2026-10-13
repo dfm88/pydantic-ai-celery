@@ -26,13 +26,17 @@ Python `>=3.11`. `pydantic-ai>=2.36` (the builder landed in 2.36; `JournalOperat
 ```python
 from celery import Celery
 from pydantic_ai import Agent
-from pydantic_ai_celery import CeleryDurability, CeleryOperationConfig, configure_celery_app
+from pydantic_ai_celery import (
+    CeleryDurability,
+    CeleryOperationConfig,
+    configure_celery_app,
+)
 
-app = Celery('agents', broker='redis://localhost:6379/0')
+app = Celery("agents", broker="redis://localhost:6379/0")
 configure_celery_app(app)
 
-durability = CeleryDurability('redis://localhost:6379/1')
-agent = Agent('openai:gpt-5', name='analyst', capabilities=[durability])
+durability = CeleryDurability("redis://localhost:6379/1")
+agent = Agent("openai:gpt-5", name="analyst", capabilities=[durability])
 
 
 @durability.task(app)
@@ -76,7 +80,7 @@ Outside `container()`, `in_durable_context` is false and the agent runs normally
 ```python
 from pydantic_ai_celery import resume
 
-resume(analyse, args=['Summarize Q3'], kwargs={})
+resume(analyse, args=["Summarize Q3"], kwargs={})
 ```
 
 `configure_celery_app(app, *, visibility_timeout: int = 86_400, prefetch_multiplier: int = 1)` sets `broker_transport_options['visibility_timeout']`, `result_backend_transport_options['visibility_timeout']` when a result backend is already configured, the app-level `visibility_timeout` Celery reads for the Redis transport, and `worker_prefetch_multiplier`. It is opt-in. Constructing the capability does not mutate app config.
@@ -123,22 +127,22 @@ A unit that raises does not write a record. The task retry starts the container 
 
 ```python
 DurabilityEngineSpec(
-    engine_name='Celery',
-    durable_unit_noun='step',
-    durable_container_noun='task',
+    engine_name="Celery",
+    durable_unit_noun="step",
+    durable_container_noun="task",
     codec=JSON_CODEC,
     serialization_failure=lambda exc: NonRetryableDurabilityError(str(exc)),
-    wrapped_toolset_kinds=frozenset({'function', 'mcp', 'dynamic'}),
+    wrapped_toolset_kinds=frozenset({"function", "mcp", "dynamic"}),
     toolset_lifecycles={
-        'function': 'enter-always',
-        'mcp': 'enter-always',
-        'dynamic': 'enter-never',
+        "function": "enter-always",
+        "mcp": "enter-always",
+        "dynamic": "enter-never",
     },
     tool_call_result_upgrade_lenient=False,
     journal_discovery=True,
     sequential_tools_in_durable_context=True,
-    unsupported_runtime_toolset_kinds=frozenset({'function', 'mcp', 'dynamic'}),
-    tool_config_key='celery',
+    unsupported_runtime_toolset_kinds=frozenset({"function", "mcp", "dynamic"}),
+    tool_config_key="celery",
 )
 ```
 
@@ -278,7 +282,8 @@ No default time limit. Callers who want a bound set `soft_time_limit_s` on the s
 @durability.task(app, soft_time_limit=3600)
 def analyse(prompt: str) -> str: ...
 
-analyse.apply_async(args=['...'], soft_time_limit=1800, time_limit=1830)
+
+analyse.apply_async(args=["..."], soft_time_limit=1800, time_limit=1830)
 ```
 
 When `soft_time_limit_s` is set and `time_limit_s` is omitted, the decorator sets the Celery hard limit to `soft_time_limit_s + time_limit_grace_s`. `time_limit_grace_s=None` leaves the hard limit unset.

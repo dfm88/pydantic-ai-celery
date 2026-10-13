@@ -57,12 +57,8 @@ def test_run_store_from_url_selects_the_backend(
 
         return build
 
-    monkeypatch.setattr(
-        "pydantic_ai_celery._store.RedisRunStore", fake("redis")
-    )
-    monkeypatch.setattr(
-        "pydantic_ai_celery._store.PostgresRunStore", fake("postgres")
-    )
+    monkeypatch.setattr("pydantic_ai_celery._store.RedisRunStore", fake("redis"))
+    monkeypatch.setattr("pydantic_ai_celery._store.PostgresRunStore", fake("postgres"))
     settings = DurabilitySettings(key_prefix="from-url")
     assert run_store_from_url("redis://localhost:6379/0", settings)[0] == "redis"
     assert run_store_from_url("rediss://localhost:6379/0", settings)[0] == "redis"
@@ -153,9 +149,7 @@ def _assert_lease_step_and_progress(store: RunStore) -> None:
     assert store.acquire_lease(_TASK_ID, "owner") is True
     # The holder may acquire again. A bare SET NX would reject this token.
     assert store.acquire_lease(_TASK_ID, "owner") is True
-    store.put_step(
-        _TASK_ID, 0, "model_request", {"output": "ok"}, token="owner"
-    )
+    store.put_step(_TASK_ID, 0, "model_request", {"output": "ok"}, token="owner")
     assert store.get_step(_TASK_ID, 0) == StepRecord(
         operation_name="model_request", payload={"output": "ok"}
     )
@@ -234,21 +228,15 @@ def test_redis_keys_hash_tag_the_task_and_append_declares_the_event_key(
                 return self._seqs.pop(0)
             return "1"
 
-    monkeypatch.setattr(
-        "pydantic_ai_celery._store._load_redis", lambda: _RedisModule
-    )
+    monkeypatch.setattr("pydantic_ai_celery._store._load_redis", lambda: _RedisModule)
     store = RedisRunStore("redis://localhost:6379/0")
     assert store._key("task-1", "lease") == "pydantic-ai-celery:{task-1}:lease"
-    assert store._key("task-1", "event", "3") == (
-        "pydantic-ai-celery:{task-1}:event:3"
-    )
+    assert store._key("task-1", "event", "3") == ("pydantic-ai-celery:{task-1}:event:3")
     client = _Client()
     store._redis = lambda: client  # type: ignore[method-assign]
     seen: list[tuple[list[str], str]] = []
 
-    def fake_eval(
-        name: str, source: str, keys: list[str], args: list[object]
-    ) -> int:
+    def fake_eval(name: str, source: str, keys: list[str], args: list[object]) -> int:
         del name, args
         seen.append((keys, source))
         return -1 if len(seen) == 1 else 2

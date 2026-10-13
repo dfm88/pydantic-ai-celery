@@ -2,9 +2,13 @@
 
 ```bash
 uv sync --group dev --all-extras
+uv run pre-commit install
 uv run pytest
 uv run ruff check src tests examples
+uv run ruff format --check src tests examples
 ```
+
+`pre-commit install` runs Ruff on each commit: `ruff check --fix`, then `ruff format`. The hook version is Ruff 0.17.0, the same release as the `ruff` dev dependency.
 
 The unit suite does not need a broker or a database.
 
